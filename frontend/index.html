@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>warpalt — Cloudflare One client</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◍</span>
+      <div>
+        <h1>warpalt</h1>
+        <p class="sub" id="org-line">not enrolled</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="pill" id="state-pill" data-state="disconnected">disconnected</span>
+      <button id="toggle-btn" class="btn primary" disabled>Enable</button>
+    </div>
+  </header>
+
+  <div class="error-banner" id="error-banner" hidden></div>
+
+  <!-- Enrollment view -->
+  <main id="view-enroll" class="view" hidden>
+    <section class="card">
+      <h2>Enroll this device</h2>
+      <p class="hint">
+        Enter your organization's team subdomain — the part before
+        <code>.cloudflareaccess.com</code>. warpalt opens the sign-in page in
+        your browser; after you authenticate, paste the token from the success
+        screen below.
+      </p>
+
+      <label for="team">Team subdomain</label>
+      <div class="row">
+        <input id="team" type="text" placeholder="mycompany" autocomplete="off" spellcheck="false">
+        <span class="suffix">.cloudflareaccess.com</span>
+        <button id="open-page-btn" class="btn" type="button">Open sign-in page</button>
+      </div>
+
+      <label for="token">Enrollment token</label>
+      <textarea id="token" rows="3" placeholder="Paste the token, or the whole com.cloudflare.warp://… link" spellcheck="false"></textarea>
+
+      <label for="device-name">Device name <span class="muted">(optional, defaults to this machine's hostname)</span></label>
+      <input id="device-name" type="text" placeholder="hostname" autocomplete="off">
+
+      <label class="check">
+        <input id="accept-tos" type="checkbox">
+        <span>I accept Cloudflare's <a href="https://www.cloudflare.com/application/terms/" target="_blank" rel="noreferrer">Terms of Service</a>.</span>
+      </label>
+
+      <div class="row end">
+        <span class="hint" id="enroll-status"></span>
+        <button id="enroll-btn" class="btn primary" type="button">Enroll device</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Main view (enrolled) -->
+  <main id="view-main" class="view" hidden>
+    <nav class="tabs">
+      <button class="tab active" data-tab="split">Split tunnel</button>
+      <button class="tab" data-tab="device">Device</button>
+    </nav>
+
+    <!-- Split tunnel tab -->
+    <section id="tab-split">
+      <div class="card">
+        <div class="card-head">
+          <h2>Traffic mode</h2>
+          <div class="mode-source" id="mode-source"></div>
+        </div>
+        <p class="hint" id="remote-note"></p>
+        <div class="mode-row">
+          <span class="mode-badge" id="mode-badge">—</span>
+          <span class="muted" id="mode-desc"></span>
+        </div>
+        <div id="local-mode-box" hidden>
+          <label for="local-mode">Mode used when organization settings are unavailable</label>
+          <select id="local-mode">
+            <option value="exclude">Exclude — tunnel everything except the list below</option>
+            <option value="include">Include — tunnel only listed destinations</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Organization's settings <span class="muted">(read-only, from your Zero Trust profile)</span></h2>
+          <button id="refresh-policy-btn" class="btn small" type="button">Refresh</button>
+        </div>
+        <ul id="org-list" class="entry-list"></ul>
+        <p class="hint" id="org-empty" hidden>No split-tunnel entries in your organization's profile.</p>
+      </div>
+
+      <div class="card">
+        <h2>Local additions <span class="muted">(always routed through the tunnel)</span></h2>
+        <p class="hint">
+          Added on top of your organization's settings, e.g. an internal host
+          you reach over SSH. More specific than organization entries, so these
+          win for exactly these addresses — nothing from your organization is
+          ever removed.
+        </p>
+        <div class="row">
+          <input id="local-input" type="text" placeholder="10.0.3.1  or  10.0.3.0/24  or  ssh.internal.example" spellcheck="false">
+          <button id="local-add-btn" class="btn" type="button">Add</button>
+        </div>
+        <ul id="local-list" class="entry-list"></ul>
+        <ul id="conflict-list" class="conflict-list"></ul>
+      </div>
+
+      <div class="card" id="warnings-card" hidden>
+        <h2>Warnings</h2>
+        <ul id="warning-list" class="conflict-list"></ul>
+      </div>
+    </section>
+
+    <!-- Device tab -->
+    <section id="tab-device" hidden>
+      <div class="card">
+        <h2>Device</h2>
+        <dl class="kv" id="device-kv"></dl>
+        <div class="row end">
+          <button id="logout-btn" class="btn danger" type="button">Log out &amp; forget device</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
