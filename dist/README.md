@@ -1,0 +1,1 @@
+Put all in one folder, run the warpalt as normal user and warpaltd as admin. To get the code open inspect element on the warp page and then go to <head> -> url and get the jwt url without the " at the end

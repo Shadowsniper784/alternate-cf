@@ -96,7 +96,9 @@ func Apply(plan Plan, tunIface string) (*Handle, error) {
 			LinkIndex: b.linkIndex,
 			Priority:  50,
 		}
-		if b.gw.IsValid() {
+		// Multicast, broadcast and link-local scopes are never routed: keep
+		// them on-link on the egress interface instead of via a gateway.
+		if b.gw.IsValid() && !isLinkLocalScope(b.prefix) {
 			r.Gw = b.gw.AsSlice()
 		}
 		if err := netlink.RouteReplace(&r); err != nil {

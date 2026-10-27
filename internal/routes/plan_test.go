@@ -25,6 +25,34 @@ func contains(list []netip.Prefix, p string) bool {
 	return false
 }
 
+// TestBuildKeepsLinkLocalOutOfTunnel guards the fix for the Windows log
+// flood: LLMNR/NetBIOS/SSDP/MLD travel with TTL 1, connect-ip refuses such
+// packets, and they can never work past the local link. They must always be
+// bypassed, whatever the organization profile asks for.
+func TestBuildKeepsLinkLocalOutOfTunnel(t *testing.T) {
+	endpoint := netip.MustParseAddr("162.159.192.10")
+	// A hostile profile that asks to tunnel the link-local scopes.
+	org := prefixes(t, "224.0.0.0/4", "169.254.0.0/16", "ff00::/8")
+	wantBypass := []string{
+		"224.0.0.0/4",
+		"255.255.255.255/32",
+		"169.254.0.0/16",
+		"ff00::/8",
+		"fe80::/10",
+	}
+	for _, mode := range []string{"exclude", "include"} {
+		plan := Build(mode, org, nil, endpoint)
+		for _, p := range wantBypass {
+			if !contains(plan.Bypass, p) {
+				t.Errorf("%s mode: %s not in bypass list: %v", mode, p, plan.Bypass)
+			}
+			if contains(plan.ViaTunnel, p) {
+				t.Errorf("%s mode: %s must not be tunneled: %v", mode, p, plan.ViaTunnel)
+			}
+		}
+	}
+}
+
 func TestBuildExcludeMode(t *testing.T) {
 	endpoint := netip.MustParseAddr("162.159.192.10")
 	org := prefixes(t, "10.0.0.0/8", "192.168.0.0/16")

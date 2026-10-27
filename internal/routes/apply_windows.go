@@ -87,10 +87,19 @@ func Apply(plan Plan, tunIface string) (*Handle, error) {
 	}
 
 	for _, b := range bypasses {
-		if err := b.luid.AddRoute(b.prefix.Masked(), b.nextHop, 1); err != nil {
+		nextHop := b.nextHop
+		if !nextHop.IsValid() || isLinkLocalScope(b.prefix) {
+			// On-link: multicast, broadcast and link-local scopes are never
+			// routed, so the next hop is the unspecified address.
+			nextHop = netip.IPv4Unspecified()
+			if b.prefix.Addr().Is6() {
+				nextHop = netip.IPv6Unspecified()
+			}
+		}
+		if err := b.luid.AddRoute(b.prefix.Masked(), nextHop, 1); err != nil {
 			return rollback(fmt.Errorf("adding bypass route %s: %w", b.prefix, err))
 		}
-		h.installed = append(h.installed, installedRoute{luid: b.luid, prefix: b.prefix, nextHop: b.nextHop})
+		h.installed = append(h.installed, installedRoute{luid: b.luid, prefix: b.prefix, nextHop: nextHop})
 	}
 
 	return h, nil

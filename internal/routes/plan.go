@@ -49,6 +49,14 @@ func Build(mode string, org, local []netip.Prefix, endpoint netip.Addr) Plan {
 		plan.ViaTunnel = append(plan.ViaTunnel, local...)
 	}
 
+	// Link-local traffic never belongs in the tunnel. Windows emits
+	// LLMNR/NetBIOS/SSDP/MLD with TTL 1, connect-ip refuses such packets
+	// because they would expire at the first hop anyway, and the discovery
+	// they carry cannot work past the local link. Keeping them out of the
+	// tunnel preserves local discovery and stops the drop log from flooding.
+	plan.Bypass = append(plan.Bypass, linkLocalBypasses()...)
+	plan.ViaTunnel = withoutLinkLocal(plan.ViaTunnel)
+
 	plan.ViaTunnel = dedupe(plan.ViaTunnel)
 	plan.Bypass = dedupe(plan.Bypass)
 
@@ -103,6 +111,42 @@ func dedupe(in []netip.Prefix) []netip.Prefix {
 		}
 		return out[i].Bits() < out[j].Bits()
 	})
+	return out
+}
+
+// linkLocalBypasses lists the destinations that can only ever travel on the
+// local link and must therefore stay out of the tunnel.
+func linkLocalBypasses() []netip.Prefix {
+	return []netip.Prefix{
+		netip.MustParsePrefix("224.0.0.0/4"),        // IPv4 multicast (SSDP, LLMNR, mDNS)
+		netip.MustParsePrefix("255.255.255.255/32"), // IPv4 limited broadcast (NetBIOS, DHCP)
+		netip.MustParsePrefix("169.254.0.0/16"),     // IPv4 link-local (APIPA)
+		netip.MustParsePrefix("ff00::/8"),           // IPv6 multicast (MLD, ND, LLMNRv6)
+		netip.MustParsePrefix("fe80::/10"),          // IPv6 link-local
+	}
+}
+
+// isLinkLocalScope reports whether a prefix is confined to the local link:
+// multicast, link-local unicast or the limited broadcast address.
+func isLinkLocalScope(p netip.Prefix) bool {
+	a := p.Addr().Unmap()
+	if a.IsMulticast() || a.IsLinkLocalUnicast() || a.IsLoopback() {
+		return true
+	}
+	// netip has no IsBroadcast: the limited broadcast address is the only
+	// IPv4 address that qualifies.
+	return a.Is4() && a.As4() == [4]byte{255, 255, 255, 255}
+}
+
+// withoutLinkLocal drops the link-local scopes from a tunnel route list.
+func withoutLinkLocal(in []netip.Prefix) []netip.Prefix {
+	out := in[:0]
+	for _, p := range in {
+		if isLinkLocalScope(p) {
+			continue
+		}
+		out = append(out, p)
+	}
 	return out
 }
 

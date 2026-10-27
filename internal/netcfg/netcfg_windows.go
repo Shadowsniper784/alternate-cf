@@ -118,6 +118,14 @@ func Create(ipv4, ipv6 string, mtu int) (*Device, error) {
 			continue
 		}
 		ipif.NLMTU = uint32(mtu)
+		// Windows breaks ties between equal-length routes by interface
+		// metric, and Wintun's automatic metric usually beats the physical
+		// adapter's. That would pull the machine's own broadcast and
+		// multicast discovery into the tunnel. A high metric makes the
+		// adapter lose those ties; the /1 routes still win on prefix length
+		// for everything the tunnel is supposed to carry.
+		ipif.UseAutomaticMetric = false
+		ipif.Metric = 5000
 		_ = ipif.Set()
 	}
 
