@@ -1,0 +1,11 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "warpalt",
+  "outputfilename": "warpalt",
+  "frontend:install": "",
+  "frontend:build": "",
+  "author": {
+    "name": "warpalt",
+    "email": ""
+  }
+}

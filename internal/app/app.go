@@ -1,32 +1,25 @@
-// Package app exposes warpalt's state to the frontend through Wails bindings.
-// Every method is a thin, thread-safe wrapper over the warp/routes/settings
-// packages; heavy operations return channels so JavaScript sees promises.
 package app
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
-	"net/netip"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/wailsapp/wails/v2/pkg/runtime"
-
+	"warpalt/internal/control"
+	"warpalt/internal/protocol"
 	"warpalt/internal/routes"
 	"warpalt/internal/settings"
 	"warpalt/internal/warp"
 )
 
-// Event names emitted to the frontend.
-const (
-	EventState  = "warp:state"
-	EventPolicy = "warp:policy"
-)
+const policyTTL = 5 * time.Minute
 
-// Status is the snapshot the UI renders in its header.
+// Status is the GUI-facing tunnel state.
 type Status struct {
 	Enrolled   bool   `json:"enrolled"`
 	Team       string `json:"team"`
@@ -40,578 +33,473 @@ type Status struct {
 	LastError  string `json:"lastError"`
 }
 
-// Entry is one split-tunnel entry for the UI.
-type Entry struct {
-	Value       string `json:"value"`
-	Kind        string `json:"kind"` // "address" | "host"
-	Description string `json:"description,omitempty"`
-}
-
-// Conflict marks a local entry that overlaps an organization entry.
-type Conflict struct {
-	Org   string `json:"org"`
-	Local string `json:"local"`
-}
-
-// SplitView is everything the split-tunnel tab needs.
-type SplitView struct {
-	Mode            string     `json:"mode"`       // effective mode
-	ModeSource      string     `json:"modeSource"` // "organization" | "local"
-	RemoteAvailable bool       `json:"remoteAvailable"`
-	RemoteError     string     `json:"remoteError,omitempty"`
-	RemoteNote      string     `json:"remoteNote,omitempty"`
-	OrgEntries      []Entry    `json:"orgEntries"`
-	LocalEntries    []Entry    `json:"localEntries"`
-	Conflicts       []Conflict `json:"conflicts"`
-	LocalMode       string     `json:"localMode"` // user's fallback preference
-	Connected       bool       `json:"connected"`
-	Warnings        []string   `json:"warnings,omitempty"`
-}
-
-// EnrollRequest is the enrollment form payload.
+// EnrollRequest is the enrollment form.
 type EnrollRequest struct {
 	Team       string `json:"team"`
 	Token      string `json:"token"`
 	DeviceName string `json:"deviceName"`
-	AcceptTOS  bool   `json:"acceptTos"`
+	AcceptTos  bool   `json:"acceptTos"`
+	Protocol   string `json:"protocol"` // "masque" or "wireguard"
 }
 
-// EnrollResult pairs a status snapshot with a failure message so the UI can
-// show either outcome from one awaited promise.
+// EnrollResult is returned even when enrollment fails, so the UI can show the
+// error without losing the current status.
 type EnrollResult struct {
 	Error  string `json:"error,omitempty"`
 	Status Status `json:"status"`
 }
 
-// App is the bound struct: window.go.app.App.*
-type App struct {
-	ctx      context.Context
-	mu       sync.Mutex
-	id       *warp.Identity
-	policy   *warp.RemotePolicy
-	settings *settings.Settings
-	tunnel   *warp.Tunnel
-	warnings []string
+// Application is the unprivileged Wails backend. It owns no sockets, routes or
+// adapters; every privileged action is an RPC to warpaltd.
+type Application struct {
+	ctx context.Context
+
+	policyMu  sync.Mutex
+	policy    *warp.RemotePolicy
+	policyAt  time.Time
+	policyGen int
+	fetching  bool
+
+	resMu    sync.Mutex
+	resolved map[string]resolution
 }
 
-// New creates the application object (before the Wails runtime starts).
-func New() *App {
-	return &App{settings: settings.Load()}
+// New creates the application.
+func New() *Application {
+	return &Application{resolved: make(map[string]resolution)}
 }
 
-// Startup runs when the Wails runtime is ready.
-func (a *App) Startup(ctx context.Context) {
+// Startup stores the Wails context.
+func (a *Application) Startup(ctx context.Context) {
 	a.ctx = ctx
-
-	id, err := warp.LoadIdentity()
-	if err != nil {
-		log.Printf("loading identity: %v", err)
-	}
-	a.mu.Lock()
-	a.id = id
-	if a.settings == nil {
-		a.settings = settings.Load()
-	}
-	a.tunnel = warp.NewTunnel(a.onTunnelState)
-	a.mu.Unlock()
-
-	if id != nil {
-		// Fetch the organization's policy in the background so the split
-		// tunnel tab shows real remote settings right away.
-		go func() {
-			p := warp.FetchRemotePolicy(id)
-			a.mu.Lock()
-			a.policy = p
-			a.mu.Unlock()
-			a.emit(EventPolicy, a.GetSplit())
-		}()
-	}
+	vlogf("startup: backend ready (daemon endpoint %s)", control.Endpoint())
 }
 
-// Shutdown stops the tunnel and restores routes before exit.
-func (a *App) Shutdown(ctx context.Context) {
-	a.mu.Lock()
-	tun := a.tunnel
-	a.mu.Unlock()
-	if tun != nil {
-		_ = tun.Stop()
-	}
-}
+// verbose mirrors WARPALT_VERBOSE from the control package so every layer of
+// the GUI writes its decisions to stdout when diagnosing a stuck window.
+var verbose = os.Getenv("WARPALT_VERBOSE") != ""
 
-func (a *App) onTunnelState(state warp.TunnelState, lastErr string) {
-	a.emit(EventState, map[string]string{"state": string(state), "error": lastErr})
-}
-
-func (a *App) emit(name string, payload any) {
-	a.mu.Lock()
-	ctx := a.ctx
-	a.mu.Unlock()
-	if ctx == nil {
+func vlogf(format string, args ...any) {
+	if !verbose {
 		return
 	}
-	runtime.EventsEmit(ctx, name, payload)
+	fmt.Fprintf(os.Stdout, "[warpalt] "+format+"\n", args...)
 }
 
-// GetStatus returns the header snapshot.
-func (a *App) GetStatus() Status {
-	a.mu.Lock()
-	id, tun := a.id, a.tunnel
-	a.mu.Unlock()
-
-	st := Status{Enrolled: id != nil}
-	if id != nil {
-		st.Team = id.Team
-		st.DeviceName = id.DeviceName
-		st.DeviceID = id.DeviceID
-		st.IPv4 = id.IPv4
-		st.IPv6 = id.IPv6
-		st.Endpoint = id.EndpointV4
+// Log is called by the frontend so browser-side diagnostics reach stdout:
+// the WebView does not forward console.log there by itself. It follows the
+// same WARPALT_VERBOSE switch as the rest of the GUI.
+func (a *Application) Log(msg string) {
+	if !verbose {
+		return
 	}
-	if tun != nil {
-		state, iface, lastErr := tun.Status()
-		st.State = string(state)
-		st.Iface = iface
-		st.LastError = lastErr
-	} else {
-		st.State = string(warp.StateDisconnected)
-	}
-	return st
+	fmt.Fprintln(os.Stdout, "[ui] "+msg)
 }
 
-// GetSplit returns the split-tunnel view from cached data (no network).
-func (a *App) GetSplit() SplitView {
-	a.mu.Lock()
-	policy := a.policy
-	var localValues []string
-	localMode := "exclude"
-	if a.settings != nil {
-		localMode = a.settings.LocalMode
-		localValues = append([]string{}, a.settings.LocalRoutes...)
-	}
-	connected := false
-	if a.tunnel != nil {
-		state, _, _ := a.tunnel.Status()
-		connected = state == warp.StateConnected || state == warp.StateConnecting || state == warp.StateReconnecting
-	}
-	warnings := append([]string{}, a.warnings...)
-	a.mu.Unlock()
+// Shutdown leaves the tunnel running: a VPN that drops when the window closes
+// is not a VPN. The daemon is stopped by the service manager.
+func (a *Application) Shutdown(context.Context) {}
 
-	view := SplitView{
-		OrgEntries:   []Entry{},
-		LocalEntries: []Entry{},
-		Conflicts:    []Conflict{},
-		Connected:    connected,
-		LocalMode:    localMode,
-		Warnings:     warnings,
-	}
-	for _, v := range localValues {
-		view.LocalEntries = append(view.LocalEntries, Entry{Value: v, Kind: kindOf(v)})
-	}
-
-	view.RemoteAvailable = policy != nil && policy.Available
-	if policy != nil && policy.Available {
-		view.RemoteError = policy.Error
-		view.RemoteNote = policy.Describe()
-		view.Mode = policy.EffectiveMode(localMode)
-		view.ModeSource = "organization"
-		for _, e := range policy.OrgEntries(view.Mode) {
-			view.OrgEntries = append(view.OrgEntries, Entry{
-				Value:       e.Value(),
-				Kind:        kindOf(e.Value()),
-				Description: e.Description,
-			})
-		}
-	} else {
-		if policy != nil {
-			view.RemoteError = policy.Error
-			view.RemoteNote = policy.Describe()
-		}
-		view.Mode = localMode
-		view.ModeSource = "local"
-	}
-
-	// Conflicts: local entries overlapping organization entries.
-	orgPrefixes, _ := resolveValues(orgValues(policy, view.Mode), false)
-	localPrefixes, _ := resolveValues(localValues, false)
-	for _, c := range routes.Conflicts(orgPrefixes, localPrefixes) {
-		view.Conflicts = append(view.Conflicts, Conflict{Org: c[0].String(), Local: c[1].String()})
-	}
-	return view
-}
-
-func orgValues(policy *warp.RemotePolicy, mode string) []string {
-	if policy == nil || !policy.Available {
-		return nil
-	}
-	var out []string
-	for _, e := range policy.OrgEntries(mode) {
-		out = append(out, e.Value())
-	}
-	return out
-}
-
-// RefreshPolicy fetches the organization's device profile asynchronously.
-func (a *App) RefreshPolicy() chan SplitView {
-	out := make(chan SplitView, 1)
-	a.mu.Lock()
-	id := a.id
-	a.mu.Unlock()
-	go func() {
-		if id != nil {
-			p := warp.FetchRemotePolicy(id)
-			a.mu.Lock()
-			a.policy = p
-			a.mu.Unlock()
-		}
-		out <- a.GetSplit()
-		close(out)
-	}()
-	return out
-}
-
-// Enroll registers a device for the given team subdomain.
-func (a *App) Enroll(req EnrollRequest) chan EnrollResult {
-	out := make(chan EnrollResult, 1)
-	go func() {
-		id, err := warp.Enroll(warp.EnrollRequest{
-			Team:       req.Team,
-			TokenInput: req.Token,
-			DeviceName: req.DeviceName,
-			AcceptTOS:  req.AcceptTOS,
-		})
-		if err != nil {
-			out <- EnrollResult{Error: err.Error(), Status: a.GetStatus()}
-			close(out)
-			return
-		}
-		a.mu.Lock()
-		a.id = id
-		a.policy = nil
-		a.mu.Unlock()
-		go func() {
-			p := warp.FetchRemotePolicy(id)
-			a.mu.Lock()
-			a.policy = p
-			a.mu.Unlock()
-			a.emit(EventPolicy, a.GetSplit())
-		}()
-		out <- EnrollResult{Status: a.GetStatus()}
-		close(out)
-	}()
-	return out
-}
-
-// OpenEnrollmentPage opens the organization's /warp sign-in page.
-func (a *App) OpenEnrollmentPage(team string) error {
-	t, err := warp.NormalizeTeam(team)
+// GetStatus returns the current daemon state, falling back to the local
+// identity when the service is not running.
+func (a *Application) GetStatus() Status {
+	st, err := control.Status()
 	if err != nil {
-		return err
-	}
-	return warp.OpenBrowser(warp.EnrollmentURL(t))
-}
-
-// Toggle is the enable/disable button: it connects (applying the split
-// tunnel) or disconnects (restoring routes). Failures land in Status.LastError.
-func (a *App) Toggle() chan Status {
-	out := make(chan Status, 1)
-	go func() {
-		if a.isRunning() {
-			a.mu.Lock()
-			tun := a.tunnel
-			a.mu.Unlock()
-			if tun != nil {
-				_ = tun.Stop()
+		vlogf("GetStatus: control.Status: %v", err)
+		out := a.localStatus()
+		if errors.Is(err, control.ErrUnavailable) {
+			if out.Enrolled {
+				msg := "warpaltd is not running. Install and start the warpalt service to enable the tunnel."
+				if strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+					msg = "Cannot access the warpalt control socket. Add your user to the warpalt group and log in again."
+				}
+				out.LastError = msg
 			}
-		} else if err := a.connect(); err != nil {
-			a.emit("warp:error", err.Error())
+		} else {
+			out.LastError = err.Error()
 		}
-		out <- a.GetStatus()
-		close(out)
-	}()
+		return out
+	}
+	out := fromProtocol(st)
+	if !out.Enrolled {
+		if id, err := warp.LoadIdentity(); err == nil && id.Validate() == nil {
+			fillFromIdentity(&out, id)
+		}
+	}
+	if out.LastError == "" && st.Error != "" {
+		out.LastError = st.Error
+	}
 	return out
 }
 
-func (a *App) isRunning() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.tunnel == nil {
-		return false
+func (a *Application) localStatus() Status {
+	out := Status{State: "disconnected"}
+	if id, err := warp.LoadIdentity(); err == nil && id.Validate() == nil {
+		fillFromIdentity(&out, id)
 	}
-	state, _, _ := a.tunnel.Status()
-	switch state {
-	case warp.StateConnecting, warp.StateConnected, warp.StateReconnecting:
-		return true
-	}
-	return false
+	return out
 }
 
-// connect computes the effective split tunnel and starts it.
-func (a *App) connect() error {
-	a.mu.Lock()
-	id, set, tun := a.id, a.settings, a.tunnel
-	a.mu.Unlock()
-
-	if id == nil {
-		return errors.New("device is not enrolled")
+func fromProtocol(st protocol.Status) Status {
+	state := st.State
+	if state == "" {
+		state = "disconnected"
 	}
-	if set == nil {
-		set = &settings.Settings{LocalMode: "exclude"}
+	return Status{
+		Enrolled:   st.Enrolled,
+		Team:       st.Team,
+		DeviceName: st.DeviceName,
+		DeviceID:   st.DeviceID,
+		IPv4:       st.IPv4,
+		IPv6:       st.IPv6,
+		Endpoint:   st.Endpoint,
+		State:      state,
+		Iface:      st.Iface,
+		LastError:  st.Error,
 	}
-	if tun == nil {
-		return errors.New("tunnel is not initialised")
-	}
+}
 
-	// Always refresh the organization's settings at connect time: remote
-	// policy is authoritative and may have changed since we last looked.
-	policy := warp.FetchRemotePolicy(id)
-	a.mu.Lock()
-	a.policy = policy
-	a.mu.Unlock()
-
-	mode := policy.EffectiveMode(set.LocalMode)
-
-	orgList := orgValues(policy, mode)
-	if !policy.Available && mode == "exclude" {
-		// Without organization settings, fall back to Cloudflare's
-		// recommended default exclusions so the local network and the
-		// machine's own services keep working.
-		orgList = defaultExclusions()
-	}
-
-	localValues := append([]string{}, set.LocalRoutes...)
-
-	orgPrefixes, orgWarn := resolveValues(orgList, true)
-	localPrefixes, localWarn := resolveValues(localValues, true)
-	warnings := append([]string{}, orgWarn...)
-	warnings = append(warnings, localWarn...)
-
-	endpoint := netip.Addr{}
-	if id.EndpointV4 != "" {
-		if v, err := netip.ParseAddr(id.EndpointV4); err == nil {
-			endpoint = v
+func fillFromIdentity(out *Status, id *warp.Identity) {
+	out.Enrolled = true
+	out.Team = id.Team
+	out.DeviceName = id.DeviceName
+	out.DeviceID = id.DeviceID
+	out.IPv4 = id.IPv4
+	out.IPv6 = id.IPv6
+	if out.Endpoint == "" && (id.EndpointV4 != "" || id.EndpointV6 != "") {
+		host := id.EndpointV4
+		if host == "" {
+			host = id.EndpointV6
 		}
-	} else if id.EndpointV6 != "" {
-		if v, err := netip.ParseAddr(id.EndpointV6); err == nil {
-			endpoint = v
+		out.Endpoint = net.JoinHostPort(host, "443")
+	}
+}
+
+// GetSplit returns the split-tunnel screen.
+func (a *Application) GetSplit() SplitView {
+	return a.buildSplitView()
+}
+
+// Toggle connects or disconnects, whichever is appropriate.
+func (a *Application) Toggle() Status {
+	current := a.GetStatus()
+	vlogf("Toggle: state=%q enrolled=%v", current.State, current.Enrolled)
+	if current.State == "connected" || current.State == "reconnecting" {
+		st, err := control.Disconnect()
+		if err != nil {
+			current.LastError = err.Error()
+			return current
 		}
+		return fromProtocol(st)
+	}
+	if current.State == "connecting" {
+		vlogf("Toggle: already connecting, ignoring disconnect request")
+		return current
 	}
 
-	plan := routes.Build(mode, orgPrefixes, localPrefixes, endpoint)
-
-	a.mu.Lock()
-	a.warnings = warnings
-	a.mu.Unlock()
-
-	if err := tun.Start(id, plan); err != nil {
-		return err
-	}
-	a.emit(EventPolicy, a.GetSplit())
-	return nil
-}
-
-// SetLocalMode sets the fallback mode used when no organization policy is
-// available. Only applies on the next connect.
-func (a *App) SetLocalMode(mode string) error {
-	if mode != "include" && mode != "exclude" {
-		return errors.New("mode must be include or exclude")
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.settings == nil {
-		a.settings = settings.Load()
-	}
-	a.settings.LocalMode = mode
-	return a.settings.Save()
-}
-
-// AddLocalRoute adds a user entry ("route through the tunnel"): an IP/CIDR
-// or a hostname.
-func (a *App) AddLocalRoute(value string) (SplitView, error) {
-	v := strings.TrimSpace(value)
-	if v == "" {
-		return SplitView{}, errors.New("enter an IP, CIDR or hostname")
-	}
-	if err := validateEntry(v); err != nil {
-		return SplitView{}, err
+	id, err := warp.LoadIdentity()
+	if err != nil || id.Validate() != nil {
+		current.LastError = "Not enrolled. Register this device first."
+		return current
 	}
 
-	a.mu.Lock()
-	if a.settings == nil {
-		a.settings = settings.Load()
-	}
-	err := a.settings.AddLocalRoute(v)
-	running := a.tunnel != nil && isRunningLocked(a.tunnel)
-	a.mu.Unlock()
-	if err != nil {
-		return SplitView{}, err
-	}
-	if running {
-		a.reconnect()
-	}
-	return a.GetSplit(), nil
-}
-
-// RemoveLocalRoute removes a user entry.
-func (a *App) RemoveLocalRoute(value string) (SplitView, error) {
-	a.mu.Lock()
-	if a.settings == nil {
-		a.settings = settings.Load()
-	}
-	err := a.settings.RemoveLocalRoute(value)
-	running := a.tunnel != nil && isRunningLocked(a.tunnel)
-	a.mu.Unlock()
-	if err != nil {
-		return SplitView{}, err
-	}
-	if running {
-		a.reconnect()
-	}
-	return a.GetSplit(), nil
-}
-
-// reconnect restarts the tunnel so routing changes take effect.
-func (a *App) reconnect() {
-	go func() {
-		a.mu.Lock()
-		tun := a.tunnel
-		a.mu.Unlock()
-		if tun == nil {
-			return
-		}
-		_ = tun.Stop()
-		if err := a.connect(); err != nil {
-			a.emit("warp:error", err.Error())
-		}
-	}()
-}
-
-// Logout stops the tunnel and forgets the registration.
-func (a *App) Logout() error {
-	a.mu.Lock()
-	tun := a.tunnel
-	a.mu.Unlock()
-	if tun != nil {
-		_ = tun.Stop()
-	}
-	if err := warp.Delete(); err != nil {
-		return err
-	}
-	a.mu.Lock()
-	a.id = nil
-	a.policy = nil
-	a.warnings = nil
-	a.mu.Unlock()
-	return nil
-}
-
-// ---- helpers ----
-
-func isRunningLocked(t *warp.Tunnel) bool {
-	state, _, _ := t.Status()
-	switch state {
-	case warp.StateConnecting, warp.StateConnected, warp.StateReconnecting:
-		return true
-	}
-	return false
-}
-
-func kindOf(v string) string {
-	if _, err := netip.ParsePrefix(v); err == nil {
-		return "address"
-	}
-	if _, err := netip.ParseAddr(v); err == nil {
-		return "address"
-	}
-	return "host"
-}
-
-func validateEntry(v string) error {
-	if _, err := netip.ParsePrefix(v); err == nil {
-		return nil
-	}
-	if _, err := netip.ParseAddr(v); err == nil {
-		return nil
-	}
-	for _, r := range v {
-		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
-			r == '.' || r == '-' || r == '_'
-		if !ok {
-			return fmt.Errorf("%q is not an IP, CIDR or hostname", v)
+	// Determine protocol from identity or ask user
+	proto := id.Protocol
+	if proto == "" {
+		// Ask user which protocol to use
+		proto = askUserProtocol()
+		if proto == "" {
+			current.LastError = "No protocol selected. Register with --protocol flag or set default."
+			return current
 		}
 	}
-	if len(v) == 0 || strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") || strings.HasSuffix(v, "-") {
-		return fmt.Errorf("%q is not a valid hostname", v)
-	}
-	return nil
-}
 
-// resolveValues turns entries into prefixes; hostnames are resolved when
-// resolve is true (at connect time). Unresolvable entries become warnings.
-func resolveValues(values []string, resolve bool) ([]netip.Prefix, []string) {
-	var out []netip.Prefix
+	local := settings.Load()
+	policy := a.remotePolicy(true)
+	var plan routes.Plan
+	// Use a different variable name to avoid shadowing the protocol package
+	var endpoint string
+	var mode string
+
 	var warnings []string
-	seen := map[netip.Prefix]struct{}{}
 
-	add := func(p netip.Prefix) {
-		p = p.Masked()
-		if _, ok := seen[p]; ok {
-			return
+	if proto == "wireguard" {
+		// Use wireguard protocol
+		if id.WgProfile == "" {
+			current.LastError = "No WireGuard profile found. Register with wireguard protocol."
+			return current
 		}
-		seen[p] = struct{}{}
-		out = append(out, p)
+		// Build plan from wireguard profile
+		plan, mode, endpoint, warnings = a.buildPlanFromWgProfile(id.WgProfile)
+		if endpoint == "" {
+			current.LastError = strings.Join(warnings, "; ")
+			if current.LastError == "" {
+				current.LastError = "No usable WireGuard endpoint in the profile."
+			}
+			return current
+		}
+	} else {
+		// MASQUE protocol (default behavior)
+		plan, mode, endpoint, warnings = a.buildPlan(id, policy, local)
+		if endpoint == "" {
+			current.LastError = strings.Join(warnings, "; ")
+			if current.LastError == "" {
+				current.LastError = "No usable MASQUE endpoint in the enrollment."
+			}
+			return current
+		}
 	}
 
-	for _, v := range values {
-		if p, err := netip.ParsePrefix(v); err == nil {
-			add(p)
-			continue
-		}
-		if a, err := netip.ParseAddr(v); err == nil {
-			add(netip.PrefixFrom(a, a.BitLen()))
-			continue
-		}
-		if !resolve {
-			continue
-		}
-		ips, err := lookupHost(v)
-		if err != nil || len(ips) == 0 {
-			warnings = append(warnings, fmt.Sprintf("could not resolve %q; entry skipped", v))
-			continue
-		}
-		for _, ip := range ips {
-			add(netip.PrefixFrom(ip, ip.BitLen()))
-		}
-	}
-	return out, warnings
-}
-
-func lookupHost(host string) ([]netip.Addr, error) {
-	ips, err := net.LookupIP(host)
+	vlogf("Toggle: connecting via %s (mode=%s, %d warnings)", endpoint, mode, len(warnings))
+	st, err := control.Connect(protocol.ConnectRequest{
+		Identity: *id,
+		Plan:     plan,
+		Endpoint: endpoint,
+		Mode:     mode,
+		MTU:      1280,
+	})
 	if err != nil {
-		return nil, err
-	}
-	var out []netip.Addr
-	for _, ip := range ips {
-		if a, ok := netip.AddrFromSlice(ip); ok {
-			out = append(out, a.Unmap())
+		vlogf("Toggle: connect failed: %v", err)
+		out := fromProtocol(st)
+		out.LastError = err.Error()
+		if !out.Enrolled {
+			fillFromIdentity(&out, id)
 		}
+		return out
 	}
-	return out, nil
+	return fromProtocol(st)
 }
 
-// defaultExclusions mirrors Cloudflare's recommended default split-tunnel
-// exclusions, used only when no organization policy could be fetched.
-func defaultExclusions() []string {
-	return []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16",
-		"100.64.0.0/10",
-		"::/128",
-		"fc00::/7",
-		"fe80::/10",
-		"::1/128",
+// askUserProtocol prompts the user to select a protocol.
+// This is a placeholder - in a real UI, this would show a dialog.
+func askUserProtocol() string {
+	// For now, default to masque since that's the existing behavior
+	return "masque"
+}
+
+// buildPlanFromWgProfile builds a route plan from a WireGuard profile string.
+func (a *Application) buildPlanFromWgProfile(profile string) (routes.Plan, string, string, []string) {
+	var plan routes.Plan
+	var mode string
+	var endpoint string
+	var warnings []string
+
+	// Parse the WireGuard profile to extract endpoint and mode
+	// For now, default to MASQUE-compatible settings
+	mode = "exclude"
+	endpoint = "162.159.197.2:443" // Default MASQUE endpoint
+
+	// Extract from profile if available
+	if strings.Contains(profile, "Endpoint=") {
+		// Extract endpoint from profile
+		idx := strings.Index(profile, "Endpoint=")
+		if idx >= 0 {
+			profile = profile[idx+9:]
+			idx2 := strings.Index(profile, "\n")
+			if idx2 >= 0 {
+				profile = profile[:idx2]
+			}
+			endpoint = strings.TrimSpace(profile)
+		}
 	}
+
+	// Build plan with wireguard-compatible routes
+	local := settings.Load()
+	// For wireguard, reuse the normal buildPlan logic with a dummy identity
+	// and a fake remote policy - the WireGuard profile only provides the
+	// endpoint, not the routing policy.
+	id := warp.Identity{EndpointV4: endpoint}
+	policy := &warp.RemotePolicy{
+		Mode:    "exclude",
+		Include: []warp.RouteEntry{},
+		Exclude: []warp.RouteEntry{},
+	}
+	plan, mode, _, warnings = a.buildPlan(&id, policy, local)
+	warnings = append(warnings, "WireGuard mode: using MASQUE-compatible routing")
+
+	return plan, mode, endpoint, warnings
+}
+
+// Enroll registers a device and hands the identity to the daemon.
+func (a *Application) Enroll(req EnrollRequest) EnrollResult {
+	vlogf("Enroll: team=%q protocol=%q", req.Team, req.Protocol)
+	id, err := warp.EnrollWithProtocol(warp.EnrollRequest{
+		Team:       req.Team,
+		TokenInput: req.Token,
+		DeviceName: req.DeviceName,
+		AcceptTOS:  req.AcceptTos,
+	}, req.Protocol)
+	if err != nil {
+		vlogf("Enroll: failed: %v", err)
+		return EnrollResult{Error: err.Error(), Status: a.GetStatus()}
+	}
+	a.invalidatePolicy()
+
+	status := a.GetStatus()
+	if _, err := control.PutIdentity(*id); err != nil {
+		status = a.GetStatus()
+		if !status.Enrolled {
+			fillFromIdentity(&status, id)
+		}
+		status.LastError = "Enrolled and saved locally, but the tunnel service is not running: " + err.Error()
+		return EnrollResult{Status: status}
+	}
+	return EnrollResult{Status: a.GetStatus()}
+}
+
+// OpenEnrollmentPage opens the team's device-enrollment page.
+func (a *Application) OpenEnrollmentPage(team string) error {
+	normalized, err := warp.NormalizeTeam(team)
+	if err != nil {
+		return err
+	}
+	return warp.OpenBrowser(warp.EnrollmentURL(normalized))
+}
+
+// SetLocalMode stores the fallback mode and reapplies it to a live tunnel.
+func (a *Application) SetLocalMode(mode string) error {
+	if mode != "include" && mode != "exclude" {
+		return fmt.Errorf("unknown split-tunnel mode %q", mode)
+	}
+	local := settings.Load()
+	local.LocalMode = mode
+	if err := local.Save(); err != nil {
+		return err
+	}
+	return a.reapply()
+}
+
+// AddLocalRoute validates, stores and applies a local route.
+func (a *Application) AddLocalRoute(value string) (SplitView, error) {
+	if err := validateEntry(value); err != nil {
+		return SplitView{}, err
+	}
+	local := settings.Load()
+	if err := local.AddLocalRoute(strings.TrimSpace(value)); err != nil {
+		return SplitView{}, err
+	}
+	return a.afterLocalChange()
+}
+
+// RemoveLocalRoute removes a local route and reapplies the plan.
+func (a *Application) RemoveLocalRoute(value string) (SplitView, error) {
+	local := settings.Load()
+	if err := local.RemoveLocalRoute(strings.TrimSpace(value)); err != nil {
+		return SplitView{}, err
+	}
+	return a.afterLocalChange()
+}
+
+func (a *Application) afterLocalChange() (SplitView, error) {
+	view := a.GetSplit()
+	if err := a.reapply(); err != nil {
+		view.Warnings = append(view.Warnings, "Saved, but the running tunnel could not apply the change: "+err.Error())
+	}
+	return view, nil
+}
+
+// RefreshPolicy forces a policy refetch and returns the refreshed view.
+func (a *Application) RefreshPolicy() SplitView {
+	a.invalidatePolicy()
+	a.remotePolicy(true)
+	return a.buildSplitView()
+}
+
+// Logout disconnects, forgets the daemon identity and removes the local one.
+func (a *Application) Logout() error {
+	_, _ = control.Logout()
+	if id, err := warp.LoadIdentity(); err == nil {
+		_ = id.Delete()
+	}
+	a.invalidatePolicy()
+	return nil
+}
+
+// reapply pushes the current plan to a live tunnel, if there is one.
+func (a *Application) reapply() error {
+	status := a.GetStatus()
+	if !isRunning(status.State) {
+		return nil
+	}
+	id, err := warp.LoadIdentity()
+	if err != nil {
+		return err
+	}
+	plan, mode, _, _ := a.buildPlan(id, a.remotePolicy(true), settings.Load())
+	_, err = control.UpdatePlan(plan, mode)
+	return err
+}
+
+func (a *Application) invalidatePolicy() {
+	a.policyMu.Lock()
+	a.policy = nil
+	a.policyAt = time.Time{}
+	a.policyGen++
+	a.policyMu.Unlock()
+}
+
+// remotePolicy returns the cached organization profile. With wait=false a
+// stale or missing profile is refreshed in the background so the UI never
+// blocks on the registration API.
+func (a *Application) remotePolicy(wait bool) *warp.RemotePolicy {
+	id, err := warp.LoadIdentity()
+	if err != nil || id.Validate() != nil {
+		vlogf("policy: not enrolled (%v)", err)
+		return &warp.RemotePolicy{Error: "not enrolled"}
+	}
+
+	a.policyMu.Lock()
+	if a.policy != nil {
+		ttl := policyTTL
+		if !a.policy.Available {
+			ttl = 30 * time.Second
+		}
+		if time.Since(a.policyAt) < ttl {
+			p := a.policy
+			a.policyMu.Unlock()
+			return p
+		}
+	}
+	if !wait {
+		p := a.policy
+		if p == nil {
+			p = &warp.RemotePolicy{Error: "organization settings are being fetched"}
+			a.policy = p
+			a.policyAt = time.Now().Add(-policyTTL)
+		}
+		start := !a.fetching
+		if start {
+			a.fetching = true
+		}
+		gen := a.policyGen
+		a.policyMu.Unlock()
+		if start {
+			go func(id warp.Identity, gen int) {
+				fetched := warp.FetchRemotePolicy(&id)
+				vlogf("policy fetch: available=%v mode=%q error=%q", fetched.Available, fetched.Mode, fetched.Error)
+				a.policyMu.Lock()
+				defer a.policyMu.Unlock()
+				if gen != a.policyGen {
+					return
+				}
+				a.policy = fetched
+				a.policyAt = time.Now()
+				a.fetching = false
+			}(*id, gen)
+		}
+		return p
+	}
+	gen := a.policyGen
+	a.policyMu.Unlock()
+
+	fetched := warp.FetchRemotePolicy(id)
+	vlogf("policy fetch (waited): available=%v mode=%q error=%q", fetched.Available, fetched.Mode, fetched.Error)
+	a.policyMu.Lock()
+	defer a.policyMu.Unlock()
+	if gen == a.policyGen {
+		a.policy = fetched
+		a.policyAt = time.Now()
+	}
+	a.fetching = false
+	return fetched
 }

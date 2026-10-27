@@ -1,20 +1,21 @@
 module warpalt
 
-go 1.27.3
+go 1.27
 
 require (
 	github.com/Diniboy1123/usque v1.5.0
-	github.com/quic-go/quic-go v0.60.0
-	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
+	github.com/Microsoft/go-winio v0.6.2
+	github.com/quic-go/quic-go v0.59.0
 	github.com/vishvananda/netlink v1.3.1
 	github.com/wailsapp/wails/v2 v2.17.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.46.0
+	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.zx2c4.com/wireguard/windows v1.1.1
 )
 
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
-	github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33 // indirect
+	github.com/Diniboy1123/connect-ip-go v0.0.0-20251011145655-7be32d5976d9 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
@@ -37,6 +38,7 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/samber/lo v1.49.1 // indirect
+	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
@@ -49,6 +51,7 @@ require (
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb // indirect
 	gvisor.dev/gvisor v0.0.0-20260408064518-65a410b0d584 // indirect
 )
+
+replace github.com/diniboy1123/usque => github.com/Diniboy1123/usque v1.5.0

@@ -1,0 +1,42 @@
+[Unit]
+Description=warpalt privileged tunnel service
+Documentation=file:///usr/share/doc/warpalt/privilege-separation.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/warpaltd
+Restart=on-failure
+RestartSec=5s
+
+# Only the capability the daemon actually needs: create/configure the TUN
+# device and change the route table. No setuid binary, no root GUI.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# /run/warpalt must be traversable by the warpalt group; the socket itself is
+# created 0660 root:warpalt by the daemon.
+RuntimeDirectory=warpalt
+RuntimeDirectoryMode=0755
+StateDirectory=warpalt
+StateDirectoryMode=0700
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

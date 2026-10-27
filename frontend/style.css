@@ -14,13 +14,30 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute only sets display:none in the UA stylesheet, which a
+   class rule such as .boot-splash { display:flex } overrides. Without this the
+   full-screen splash can never be hidden and the window stays on
+   "Loading warpalt…" forever. */
+[hidden] { display: none !important; }
+
+html {
+  width: 100%;
+  height: 100%;
+}
+
 body {
   margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100%;
   font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
   line-height: 1.45;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---------- header ---------- */
@@ -31,6 +48,11 @@ body {
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, #171b24, #13161d);
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .brand { display: flex; align-items: center; gap: 12px; }
 .logo { font-size: 26px; color: var(--accent); }
@@ -53,13 +75,16 @@ h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: .3px; }
 .pill[data-state="error"] { color: var(--err); border-color: rgba(239,95,112,.4); }
 
 /* ---------- layout ---------- */
-.view { max-width: 900px; margin: 0 auto; padding: 18px 20px 40px; }
+.view { max-width: 900px; width: 100%; margin: 0 auto; padding: 18px 20px 40px; box-sizing: border-box; min-width: 0; flex: 1 1 auto; }
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 16px 18px;
   margin-bottom: 16px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 .card h2 { margin: 0 0 10px; font-size: 14.5px; font-weight: 600; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -82,7 +107,9 @@ input[type="text"], textarea, select {
 input[type="text"]:focus, textarea:focus, select:focus { border-color: var(--accent); }
 textarea { resize: vertical; }
 
-.row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+.row > * { min-width: 0; flex-shrink: 1; }
+.row input[type="text"], .row textarea, .row select { flex: 1 1 0%; min-width: 0; width: 100%; }
 .row.end { justify-content: flex-end; margin-top: 14px; }
 .suffix { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 
@@ -157,6 +184,20 @@ textarea { resize: vertical; }
 .kv { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; margin: 0; }
 .kv dt { color: var(--muted); font-size: 12.5px; }
 .kv dd { margin: 0; font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; font-size: 12.5px; word-break: break-all; }
+
+/* ---------- boot splash ---------- */
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 14px;
+  background: var(--bg);
+  z-index: 999;
+  transition: opacity 120ms ease;
+}
 
 /* ---------- error banner ---------- */
 .error-banner {

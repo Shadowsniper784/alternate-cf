@@ -1,0 +1,3 @@
+# Create the unprivileged group that may talk to warpaltd's control socket.
+# Install as /usr/lib/sysusers.d/warpalt.conf.
+g warpalt -

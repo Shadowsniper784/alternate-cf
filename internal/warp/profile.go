@@ -17,10 +17,10 @@ const (
 )
 
 var apiHeaders = map[string]string{
-	"User-Agent":       "WARP for Android",
+	"User-Agent":        "WARP for Android",
 	"CF-Client-Version": "a-6.35-4471",
-	"Content-Type":     "application/json; charset=UTF-8",
-	"Connection":       "Keep-Alive",
+	"Content-Type":      "application/json; charset=UTF-8",
+	"Connection":        "Keep-Alive",
 }
 
 // RouteEntry is one split-tunnel entry as Cloudflare returns it: either a
@@ -52,7 +52,7 @@ type RemotePolicy struct {
 	// Mode is "include" or "exclude"; empty when Cloudflare did not say.
 	Mode string `json:"mode,omitempty"`
 	// ServiceMode is the client mode ("warp", "1dot1", "proxy", ...).
-	ServiceMode string     `json:"serviceMode,omitempty"`
+	ServiceMode string       `json:"serviceMode,omitempty"`
 	Include     []RouteEntry `json:"include,omitempty"`
 	Exclude     []RouteEntry `json:"exclude,omitempty"`
 	// Error explains an unavailable policy in user-facing terms.
@@ -70,7 +70,7 @@ type policyPayload struct {
 }
 
 type policyBlock struct {
-	ServiceMode   string       `json:"service_mode"`
+	ServiceMode   string `json:"service_mode"`
 	ServiceModeV2 struct {
 		Mode string `json:"mode"`
 	} `json:"service_mode_v2"`

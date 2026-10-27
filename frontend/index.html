@@ -52,6 +52,13 @@
         <span>I accept Cloudflare's <a href="https://www.cloudflare.com/application/terms/" target="_blank" rel="noreferrer">Terms of Service</a>.</span>
       </label>
 
+      <p class="hint" id="protocol-selector">
+        <input type="radio" id="protocol-masque" name="protocol" value="masque" checked>
+        <label for="protocol-masque">MASQUE (default)</label>
+        <input type="radio" id="protocol-wg" name="protocol" value="wireguard">
+        <label for="protocol-wg">WireGuard</label>
+      </p>
+
       <div class="row end">
         <span class="hint" id="enroll-status"></span>
         <button id="enroll-btn" class="btn primary" type="button">Enroll device</button>
@@ -130,6 +137,7 @@
     </section>
   </main>
 
+  <div id="boot-splash" class="boot-splash" hidden>Loading warpalt…</div>
   <script src="app.js"></script>
 </body>
 </html>

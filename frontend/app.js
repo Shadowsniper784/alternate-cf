@@ -7,13 +7,26 @@
 
   // ---- binding access ----------------------------------------------------
   // The namespace follows the Go package that defines the bound struct
-  // ("app"), but we also accept "main" so the file works unchanged if the
-  // struct ever moves into package main.
+  // ("app"). The struct has been renamed over time, so accept every known
+  // spelling — and, failing that, the single struct Wails exposes — instead of
+  // silently reporting "backend not ready" and leaving the window stuck on the
+  // loading splash.
   function backend() {
     const g = window.go;
-    if (!g) return null;
-    if (g.app && g.app.App) return g.app.App;
-    if (g.main && g.main.App) return g.main.App;
+    if (!g) {
+      console.warn("warpalt: window.go is not present; the Wails Go backend did not start");
+      return null;
+    }
+    for (const pkg of ["app", "main"]) {
+      const structs = g[pkg];
+      if (!structs) continue;
+      for (const name of ["App", "Application"]) {
+        if (structs[name]) return structs[name];
+      }
+      const names = Object.keys(structs);
+      if (names.length === 1 && structs[names[0]]) return structs[names[0]];
+    }
+    console.warn("warpalt: no bound struct found in window.go:", JSON.stringify(Object.keys(g)));
     return null;
   }
 
@@ -27,6 +40,31 @@
     } catch (e) {
       return Promise.reject(e);
     }
+  }
+
+  // ---- logging -----------------------------------------------------------
+  // The WebView does not forward console.log to the process stdout, so every
+  // diagnostic also goes through the Go binding's Log method, which prints it
+  // as a [ui] line. That is what makes a stuck window debuggable.
+  let pendingLogs = [];
+  function log(...args) {
+    const line = args.map((a) => {
+      if (a instanceof Error) return a.stack || String(a);
+      if (typeof a === "object" && a !== null) { try { return JSON.stringify(a); } catch (_) { return String(a); } }
+      return String(a);
+    }).join(" ");
+    console.log("[warpalt]", ...args);
+    const be = backend();
+    if (!be || typeof be.Log !== "function") {
+      // The Go binding may not be injected yet; queue so boot lines are not
+      // lost before the backend appears.
+      pendingLogs.push(line);
+      if (pendingLogs.length > 100) pendingLogs.shift();
+      return;
+    }
+    const send = (m) => { try { Promise.resolve(be.Log(m)).catch(() => {}); } catch (_) {} };
+    send(line);
+    for (const m of pendingLogs.splice(0)) send(m);
   }
 
   // ---- DOM helpers -------------------------------------------------------
@@ -62,10 +100,11 @@
     pill.dataset.state = status.state || "disconnected";
     pill.textContent = status.state || "disconnected";
 
-    const running = ["connecting", "connected", "reconnecting"].includes(status.state);
-    btn.textContent = running ? "Disable" : "Enable";
-    btn.disabled = !status.enrolled;
-    btn.classList.toggle("primary", !running);
+    const running = ["connected", "reconnecting"].includes(status.state);
+    const connecting = status.state === "connecting";
+    btn.textContent = running ? "Disable" : connecting ? "Connecting…" : "Enable";
+    btn.disabled = !status.enrolled || connecting;
+    btn.classList.toggle("primary", !running && !connecting);
 
     if (status.enrolled) {
       orgLine.textContent = (status.team || "personal") + " · " + (status.deviceName || "");
@@ -193,9 +232,20 @@
   }
 
   // ---- actions -----------------------------------------------------------
+  let firstStatusLogged = false;
   async function refreshAll() {
-    try { status = await call("GetStatus"); renderStatus(); } catch (_) {}
-    try { split = await call("GetSplit"); renderSplit(); } catch (_) {}
+    try {
+      status = await call("GetStatus");
+      renderStatus();
+      if (!firstStatusLogged) {
+        firstStatusLogged = true;
+        log("GetStatus ok:", status && status.state, "enrolled=", status && status.enrolled);
+      }
+    } catch (e) { log("GetStatus failed:", e); }
+    try {
+      split = await call("GetSplit");
+      renderSplit();
+    } catch (e) { log("GetSplit failed:", e); }
   }
 
   $("toggle-btn").addEventListener("click", async () => {
@@ -227,6 +277,7 @@
         token: $("token").value,
         deviceName: $("device-name").value,
         acceptTos: $("accept-tos").checked,
+        protocol: $("protocol-masque").checked ? "masque" : "wireguard",
       });
       if (res && res.error) {
         statusLine.textContent = "";
@@ -293,10 +344,11 @@
 
   // ---- events ------------------------------------------------------------
   function wireEvents() {
+    // The daemon reports connecting/connected asynchronously, so always poll.
+    // Events, when present, still update the UI a little faster.
+    setInterval(refreshAll, 1500);
     const rt = window.runtime;
     if (!rt || typeof rt.EventsOn !== "function") {
-      // Fallback: poll.
-      setInterval(refreshAll, 1500);
       return;
     }
     rt.EventsOn("warp:state", (payload) => {
@@ -312,12 +364,73 @@
 
   // ---- boot --------------------------------------------------------------
   window.addEventListener("DOMContentLoaded", async () => {
+    log("boot: DOM ready");
+    log("boot: window.go present =", !!window.go, ", runtime present =", !!window.runtime);
+    const rect = document.body.getBoundingClientRect();
+    log("boot: viewport =", window.innerWidth + "x" + window.innerHeight,
+        ", body =", Math.round(rect.width) + "x" + Math.round(rect.height),
+        ", dpr =", window.devicePixelRatio,
+        ", enroll view =", ($("view-enroll") ? Math.round($("view-enroll").getBoundingClientRect().width) : "?"));
+    setTimeout(() => {
+      const de = document.documentElement;
+      log("boot+2s: viewport =", window.innerWidth + "x" + window.innerHeight,
+          ", docElement =", de.clientWidth + "x" + de.clientHeight,
+          ", visual =", window.visualViewport ? (Math.round(window.visualViewport.width) + "x" + Math.round(window.visualViewport.height) + " @" + window.visualViewport.scale) : "n/a",
+          ", screen =", screen.width + "x" + screen.height,
+          ", dpr =", window.devicePixelRatio,
+          ", topbar =", Math.round((document.querySelector(".topbar") || { getBoundingClientRect: () => ({ width: 0 }) }).getBoundingClientRect().width));
+    }, 2000);
     wireEvents();
+
+    // Show a short-lived loading line while the backend starts. Once the
+    // first status arrives this line is hidden again. A hard timeout makes
+    // sure a hung backend call can never leave the window stuck on this
+    // splash: after 6 seconds we show the last known state and say so.
+    const boot = $("boot-splash");
+    let bootDone = false;
+    if (boot) {
+      boot.hidden = false;
+      const hideBoot = (why) => {
+        if (bootDone) return;
+        bootDone = true;
+        boot.hidden = true;
+        if (why) log("boot: splash hidden (" + why + ")");
+      };
+      refreshAll().then(() => hideBoot("first refresh"), (e) => { log("boot: refresh rejected", e); hideBoot("refresh rejected"); });
+      setTimeout(() => {
+        if (bootDone) return;
+        log("boot: timeout waiting for backend, status =", status);
+        hideBoot("timeout");
+        if (!status) showError("Still waiting for the warpalt backend. Run with WARPALT_VERBOSE=1 to see why.");
+      }, 6000);
+    }
+
     await refreshAll();
+    if (status) {
+      log("boot: first status arrived");
+      renderStatus();
+      try { split = await call("GetSplit"); renderSplit(); } catch (_) {}
+    } else {
+      // If the backend is genuinely missing we want the user to see a useful
+      // message rather than a blank window.
+      const be = backend();
+      log("boot: no status yet, backend =", !!be, ", runtime =", !!window.runtime);
+      if (!be) {
+        showError("warpalt backend is not running. Restart the app.");
+      } else if (!window.runtime) {
+        showError("warpalt web runtime is not available.");
+      }
+    }
+
     // The backend may still be starting: retry until the first answer.
     let tries = 0;
     const iv = setInterval(async () => {
-      if (status || tries++ > 20) { clearInterval(iv); return; }
+      if (status) { clearInterval(iv); return; }
+      if (tries++ > 20) {
+        clearInterval(iv);
+        log("boot: no status after retries");
+        return;
+      }
       await refreshAll();
     }, 300);
   });

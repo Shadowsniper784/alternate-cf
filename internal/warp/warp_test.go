@@ -2,18 +2,20 @@ package warp
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestNormalizeTeam(t *testing.T) {
 	cases := map[string]string{
-		"mycompany":                          "mycompany",
-		"MyCompany":                          "mycompany",
-		"mycompany.cloudflareaccess.com":     "mycompany",
-		"https://mycompany.cloudflareaccess.com": "mycompany",
+		"mycompany":                                 "mycompany",
+		"MyCompany":                                 "mycompany",
+		"mycompany.cloudflareaccess.com":            "mycompany",
+		"https://mycompany.cloudflareaccess.com":    "mycompany",
 		"https://my-team.cloudflareaccess.com/warp": "my-team",
-		"my-company-1": "my-company-1",
+		"my-company-1":                              "my-company-1",
 	}
 	for in, want := range cases {
 		got, err := NormalizeTeam(in)
@@ -38,8 +40,8 @@ func TestParseTeamToken(t *testing.T) {
 	cases := map[string]string{
 		raw: raw,
 		"com.cloudflare.warp://mycompany.cloudflareaccess.com/auth?token=" + raw: raw,
-		"https://mycompany.cloudflareaccess.com/warp-d/capture?token=" + raw:      raw,
-		"https://mycompany.cloudflareaccess.com/x?token=" + raw + "&other=1":      raw,
+		"https://mycompany.cloudflareaccess.com/warp-d/capture?token=" + raw:     raw,
+		"https://mycompany.cloudflareaccess.com/x?token=" + raw + "&other=1":     raw,
 		"  " + raw + "  ": raw,
 	}
 	for in, want := range cases {
@@ -59,11 +61,11 @@ func TestParseTeamToken(t *testing.T) {
 
 func TestEndpointHost(t *testing.T) {
 	cases := map[string]string{
-		"162.159.192.10:0":    "162.159.192.10",
-		"162.159.192.10":      "162.159.192.10",
+		"162.159.192.10:0":            "162.159.192.10",
+		"162.159.192.10":              "162.159.192.10",
 		"[2606:4700:d0::a29f:c001]:0": "2606:4700:d0::a29f:c001",
 		"[2606:4700:d0::a29f:c001]":   "2606:4700:d0::a29f:c001",
-		"": "",
+		"":                            "",
 	}
 	for in, want := range cases {
 		if got := endpointHost(in); got != want {
@@ -153,5 +155,61 @@ func TestFetchRemotePolicyToleratesShapes(t *testing.T) {
 	}
 	if !strings.Contains(payload.Policy.ServiceModeV2.Mode, "warp") {
 		t.Errorf("service mode lost: %+v", payload.Policy.ServiceModeV2)
+	}
+}
+
+func TestWgProfileRoundTrip(t *testing.T) {
+	conf := "[Interface]\n" +
+		"PrivateKey = cHJpdmF0ZQ==\n" +
+		"Address = 172.16.0.2/32, fd00::2/128\n" +
+		"DNS = 1.1.1.1\n\n" +
+		"[Peer]\n" +
+		"PublicKey = cHVibGlj\n" +
+		"Endpoint = engage.cloudflareclient.com:2408\n" +
+		"AllowedIPs = 0.0.0.0/0\n" +
+		"PersistentKeepalive = 25\n"
+	path := filepath.Join(t.TempDir(), "wg.conf")
+	if err := os.WriteFile(path, []byte(conf), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := ParseWgProfile(path)
+	if err != nil {
+		t.Fatalf("ParseWgProfile: %v", err)
+	}
+	if p.PrivateKey != "cHJpdmF0ZQ==" || p.PublicKey != "cHVibGlj" {
+		t.Errorf("keys lost: %+v", p)
+	}
+	if p.Address1 != "172.16.0.2/32" || p.Address2 != "fd00::2/128" {
+		t.Errorf("addresses lost: %+v", p)
+	}
+	if p.Endpoint != "engage.cloudflareclient.com:2408" || p.Keepalive != 25 {
+		t.Errorf("endpoint/keepalive lost: %+v", p)
+	}
+	out, err := GenerateWgProfile(p)
+	if err != nil {
+		t.Fatalf("GenerateWgProfile: %v", err)
+	}
+	for _, want := range []string{
+		"PrivateKey = cHJpdmF0ZQ==",
+		"Address = 172.16.0.2/32",
+		"Address = fd00::2/128",
+		"PublicKey = cHVibGlj",
+		"Endpoint = engage.cloudflareclient.com:2408",
+		"PersistentKeepalive = 25",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated profile missing %q:\n%s", want, out)
+		}
+	}
+
+	if _, err := ParseWgProfile(filepath.Join(t.TempDir(), "missing.conf")); err == nil {
+		t.Error("ParseWgProfile on a missing file should fail")
+	}
+	bad := filepath.Join(t.TempDir(), "bad.conf")
+	if err := os.WriteFile(bad, []byte("[Interface]\nPrivateKey = x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseWgProfile(bad); err == nil {
+		t.Error("ParseWgProfile should reject a config without a peer endpoint")
 	}
 }

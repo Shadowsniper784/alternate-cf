@@ -2,8 +2,10 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -16,12 +18,29 @@ import (
 var frontendAssets embed.FS
 
 func main() {
+	// Must run before the first WebView exists: without it GTK's unset DPI
+	// sentinel makes WebKitGTK scale the page by -1/96 and the window renders
+	// as a super-thin column.
+	fixGTKDPI()
+
+	// Verbose mode: every diagnostic (GUI, control plane, frontend) goes to
+	// stdout so `WARPALT_VERBOSE=1 ./warpalt` shows why the window is stuck.
+	verbose := os.Getenv("WARPALT_VERBOSE") != ""
+	if verbose {
+		log.SetOutput(os.Stdout)
+		fmt.Fprintln(os.Stdout, "[warpalt] verbose logging enabled")
+	}
+
 	assets, err := fs.Sub(frontendAssets, "frontend")
 	if err != nil {
 		log.Fatalf("embedding frontend: %v", err)
 	}
 
 	application := app.New()
+
+	if verbose {
+		fmt.Fprintln(os.Stdout, "[warpalt] starting wails runtime")
+	}
 
 	err = wails.Run(&options.App{
 		Title:     "warpalt — Cloudflare One client",
